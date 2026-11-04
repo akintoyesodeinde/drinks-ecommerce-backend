@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DrinksEcommerce.API\DrinksEcommerce.API.csproj" />
+    <ProjectReference Include="..\..\src\DrinksEcommerce.Application\DrinksEcommerce.Application.csproj" />
+    <ProjectReference Include="..\..\src\DrinksEcommerce.Domain\DrinksEcommerce.Domain.csproj" />
+    <ProjectReference Include="..\..\src\DrinksEcommerce.Infrastructure\DrinksEcommerce.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\DrinksEcommerce.Persistence\DrinksEcommerce.Persistence.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>

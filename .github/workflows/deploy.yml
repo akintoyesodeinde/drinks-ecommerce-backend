@@ -1,0 +1,174 @@
+name: Backend CI/CD — Build, Test, Docker Hub & AWS EC2 OIDC Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOCKERHUB_REPO: "akintoyesodeinde/drinks-ecommerce-backend"
+  DEFAULT_AWS_REGION: "us-east-1"
+  DEFAULT_AWS_ROLE_ARN: "arn:aws:iam::402535053369:role/DrinksEcommerce-GitHubActions-Deploy"
+
+jobs:
+  build-and-test:
+    name: Build & Test (.NET 10 + SQL Server 2022)
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "CiTest_StrongPassword_2026!"
+          MSSQL_PID: "Developer"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CiTest_StrongPassword_2026!' -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'CiTest_StrongPassword_2026!' -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout Backend Repository
+        uses: actions/checkout@v4
+
+      - name: Verify Project Identity (Reject Foreign Project Contamination)
+        run: |
+          if grep -R -i "Naija""Pay" . --exclude-dir=.git; then
+            echo "ERROR: Foreign project identifier detected in repository!"
+            exit 1
+          fi
+
+      - name: Setup .NET 10 LTS SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore NuGet Packages
+        run: dotnet restore DrinksEcommerce.sln
+
+      - name: Build Solution (Release)
+        run: dotnet build DrinksEcommerce.sln --configuration Release --no-restore
+
+      - name: Execute Unit, Clean Architecture & SQL Server Integration Tests
+        env:
+          TEST_DATABASE_PROVIDER: "SqlServer"
+          TEST_CONNECTION_STRING: "Server=127.0.0.1,1433;Database=DrinksEcommerceCiTestDb;User Id=sa;Password=CiTest_StrongPassword_2026!;TrustServerCertificate=True;MultipleActiveResultSets=True"
+        run: dotnet test DrinksEcommerce.sln --configuration Release --no-build --verbosity normal
+
+  publish-and-deploy:
+    name: Publish to Docker Hub & Deploy to AWS EC2 via OIDC + SSM
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Backend Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to Docker Hub (Dedicated Access Token)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push Backend Image (Immutable Commit SHA + latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_REPO }}:${{ github.sha }}
+            ${{ env.DOCKERHUB_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Configure AWS Credentials via GitHub OIDC (No Static AWS Keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || env.DEFAULT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || env.DEFAULT_AWS_REGION }}
+          role-session-name: GitHubActions-DrinksBackend-${{ github.run_id }}
+
+      - name: Verify Assumed AWS STS Identity & Account 402535053369
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query 'Account' --output text)"
+          ARN="$(aws sts get-caller-identity --query 'Arn' --output text)"
+          echo "Assumed Role ARN: ${ARN}"
+          if [ "${ACCOUNT_ID}" != "402535053369" ]; then
+            echo "ERROR: Unexpected AWS Account ID ${ACCOUNT_ID}"
+            exit 1
+          fi
+
+      - name: Trigger Controlled Backend Migration & Deployment on EC2 via AWS SSM
+        env:
+          IMAGE_TAG: "${{ env.DOCKERHUB_REPO }}:${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          INSTANCE_ID="$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=DrinksEcommerce" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)"
+
+          if [ -z "${INSTANCE_ID}" ] || [ "${INSTANCE_ID}" = "None" ]; then
+            echo "ERROR: No running EC2 instance found with tag Project=DrinksEcommerce."
+            exit 1
+          fi
+          echo "Target EC2 Instance: ${INSTANCE_ID}"
+
+          DEPLOY_B64="$(base64 -w0 deploy/scripts/deploy-backend.sh)"
+
+          COMMAND_ID="$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy DrinksEcommerce Backend ${GITHUB_SHA}" \
+            --parameters "commands=[\"set -euo pipefail\",\"mkdir -p /opt/drinks-ecommerce/scripts\",\"echo '${DEPLOY_B64}' | base64 -d > /opt/drinks-ecommerce/scripts/deploy-backend.sh\",\"chmod 700 /opt/drinks-ecommerce/scripts/deploy-backend.sh\",\"/opt/drinks-ecommerce/scripts/deploy-backend.sh '${IMAGE_TAG}'\"]" \
+            --query "Command.CommandId" \
+            --output text)"
+
+          echo "Dispatched SSM CommandId: ${COMMAND_ID}. Polling execution status..."
+          for attempt in {1..60}; do
+            STATUS="$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${INSTANCE_ID}" \
+              --query "Status" \
+              --output text 2>/dev/null || echo "Pending")"
+
+            if [ "${STATUS}" = "Success" ]; then
+              echo "SSM Deployment Command Succeeded!"
+              aws ssm get-command-invocation \
+                --command-id "${COMMAND_ID}" \
+                --instance-id "${INSTANCE_ID}" \
+                --query "StandardOutputContent" \
+                --output text
+              exit 0
+            elif [ "${STATUS}" = "Failed" ] || [ "${STATUS}" = "Cancelled" ] || [ "${STATUS}" = "TimedOut" ]; then
+              echo "ERROR: SSM Deployment Command ${STATUS}!"
+              aws ssm get-command-invocation \
+                --command-id "${COMMAND_ID}" \
+                --instance-id "${INSTANCE_ID}" \
+                --query "StandardOutputContent" \
+                --output text || true
+              aws ssm get-command-invocation \
+                --command-id "${COMMAND_ID}" \
+                --instance-id "${INSTANCE_ID}" \
+                --query "StandardErrorContent" \
+                --output text || true
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "ERROR: Timed out waiting for SSM command ${COMMAND_ID}."
+          exit 1

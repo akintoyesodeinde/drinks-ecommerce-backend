@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GitHubActionsOIDCTrustForDrinksEcommerce",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::402535053369:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": [
+            "repo:akintoyesodeinde/drinks-ecommerce-backend:ref:refs/heads/main",
+            "repo:akintoyesodeinde/drinks-ecommerce-backend:environment:production",
+            "repo:akintoyesodeinde/drinks-ecommerce-frontend:ref:refs/heads/main",
+            "repo:akintoyesodeinde/drinks-ecommerce-frontend:environment:production"
+          ]
+        }
+      }
+    }
+  ]
+}

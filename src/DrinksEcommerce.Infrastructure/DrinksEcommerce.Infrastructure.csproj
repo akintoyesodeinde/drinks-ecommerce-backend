@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>DrinksEcommerce.Infrastructure</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DrinksEcommerce.Application\DrinksEcommerce.Application.csproj" />
+    <ProjectReference Include="..\DrinksEcommerce.Domain\DrinksEcommerce.Domain.csproj" />
+    <ProjectReference Include="..\DrinksEcommerce.Persistence\DrinksEcommerce.Persistence.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="MailKit" />
+    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+  </ItemGroup>
+</Project>

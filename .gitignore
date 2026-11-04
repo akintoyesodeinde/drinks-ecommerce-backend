@@ -1,0 +1,40 @@
+## .NET / Visual Studio / Rider build & user artifacts
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+.vs/
+.idea/
+.vscode/
+*.user
+*.userosscache
+*.suo
+*.sln.docstates
+TestResults/
+coverage/
+*.nupkg
+*.snupkg
+
+## Local development settings and secrets (NEVER COMMIT)
+appsettings.Development.json
+appsettings.Local.json
+appsettings.Production.json
+secrets*.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.pem
+*.key
+*.pubxml
+
+## Runtime uploaded files
+src/DrinksEcommerce.API/wwwroot/uploads/*
+!src/DrinksEcommerce.API/wwwroot/uploads/.gitkeep
+
+## OS / temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp

@@ -1,0 +1,124 @@
+name: drinks-ecommerce-prod
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: drinks-sqlserver
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "${MSSQL_PID:-Express}"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      MSSQL_MEMORY_LIMIT_MB: "1536"
+      TZ: "Africa/Lagos"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+      - sqlserver_backups:/var/opt/mssql/backups
+    networks:
+      - drinks_internal
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    container_name: drinks-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - drinks_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    image: "${BACKEND_IMAGE:-akintoyesodeinde/drinks-ecommerce-backend:latest}"
+    container_name: drinks-api
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - /opt/drinks-ecommerce/.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Production"
+      ASPNETCORE_URLS: "http://+:8080"
+      TZ: "Africa/Lagos"
+      Database__SkipAutoInitialize: "true"
+    volumes:
+      - api_uploads:/app/wwwroot/uploads
+    networks:
+      - drinks_internal
+    healthcheck:
+      test: ["CMD", "dotnet", "DrinksEcommerce.API.dll", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "5"
+
+  frontend:
+    image: "${FRONTEND_IMAGE:-akintoyesodeinde/drinks-ecommerce-frontend:latest}"
+    container_name: drinks-frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_UPSTREAM: "http://api:8080"
+    volumes:
+      - /opt/drinks-ecommerce/certs:/etc/letsencrypt:ro
+      - /opt/drinks-ecommerce/certbot-www:/var/www/certbot:ro
+    networks:
+      - drinks_internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  drinks_internal:
+    driver: bridge
+
+volumes:
+  sqlserver_data:
+    name: drinks_sqlserver_data
+  sqlserver_backups:
+    name: drinks_sqlserver_backups
+  redis_data:
+    name: drinks_redis_data
+  api_uploads:
+    name: drinks_api_uploads
