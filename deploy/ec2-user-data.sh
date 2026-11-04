@@ -124,7 +124,8 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - /opt/drinks-ecommerce/.env
+      - path: .env
+        required: false
     environment:
       ASPNETCORE_ENVIRONMENT: "Production"
       ASPNETCORE_URLS: "http://+:8080"
