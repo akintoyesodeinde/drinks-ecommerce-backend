@@ -18,7 +18,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ExpectedAccountId = "402535053369",
+    [string]$ExpectedAccountId = "415805875879",
     [string]$Region = "us-east-1",
     [string]$InstanceType = "t3.medium",
     [switch]$LaunchInstance
@@ -151,6 +151,62 @@ if (-not $sgId -or $sgId -eq "None") {
 }
 Write-Host "Security Group Ready: $sgId (VPC: $vpcId)" -ForegroundColor Green
 
+Write-Host "`n=== 5b. Ensuring AWS Secrets Manager Secret (drinks-ecommerce/prod/app-secrets) ===" -ForegroundColor Cyan
+$secretName = "drinks-ecommerce/prod/app-secrets"
+aws secretsmanager describe-secret --region $Region --secret-id $secretName 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $bytes32 = New-Object byte[] 32
+    $rng.GetBytes($bytes32)
+    $sqlPass = "DrkSql#" + ([Convert]::ToBase64String($bytes32).Substring(0, 18) -replace '[+/=]', '9') + "!aA1"
+
+    $bytes64 = New-Object byte[] 48
+    $rng.GetBytes($bytes64)
+    $jwtKey = [Convert]::ToBase64String($bytes64)
+
+    $bytes24 = New-Object byte[] 24
+    $rng.GetBytes($bytes24)
+    $adminPass = "DrkAdm#" + ([Convert]::ToBase64String($bytes24).Substring(0, 16) -replace '[+/=]', '7') + "!zZ9"
+
+    $secretPayload = @{
+        MSSQL_PID = "Express"
+        MSSQL_SA_PASSWORD = $sqlPass
+        ConnectionStrings__DefaultConnection = "Server=sqlserver,1433;Database=DrinksEcommerceDb;User Id=sa;Password=$sqlPass;TrustServerCertificate=True;MultipleActiveResultSets=True;Encrypt=False"
+        ConnectionStrings__Redis = "redis:6379,abortConnect=false"
+        Database__SeedCatalog = "true"
+        Database__SeedDemoAccounts = "false"
+        BootstrapAdmin__Email = "hr@pinnaclesoftwareservices.store"
+        BootstrapAdmin__Password = $adminPass
+        BootstrapAdmin__FirstName = "Akintoye"
+        BootstrapAdmin__LastName = "Sodeinde"
+        BootstrapAdmin__Phone = "+2348030000000"
+        Jwt__Issuer = "DrinksEcommerce.API"
+        Jwt__Audience = "DrinksEcommerce.Clients"
+        Jwt__SigningKey = $jwtKey
+        Payments__Provider = "Simulated"
+        Payments__BaseUrl = "https://api.paystack.co/"
+        Payments__PublicKey = "pk_test_replace_in_secrets_manager"
+        Payments__SecretKey = "sk_test_replace_in_secrets_manager"
+        Store__AlcoholSalesEnabled = "false"
+    } | ConvertTo-Json -Compress
+
+    $tempSecretFile = Join-Path $env:TEMP ("drinks-secret-" + [Guid]::NewGuid().ToString("N") + ".json")
+    try {
+        Set-Content -Path $tempSecretFile -Value $secretPayload -NoNewline -Encoding utf8
+        aws secretsmanager create-secret `
+            --region $Region `
+            --name $secretName `
+            --description "DrinksEcommerce Production Runtime Configuration & Secrets" `
+            --secret-string "file://$tempSecretFile" `
+            --tags Key=Project,Value=DrinksEcommerce | Out-Null
+        Write-Host "Created Secrets Manager secret: $secretName (strong random credentials generated in memory; never printed)" -ForegroundColor Green
+    } finally {
+        if (Test-Path $tempSecretFile) { Remove-Item -Force $tempSecretFile }
+    }
+} else {
+    Write-Host "Secrets Manager secret already exists: $secretName" -ForegroundColor Green
+}
+
 Write-Host "`n=== 6. Resolving Latest Amazon Linux 2023 x86_64 AMI & Creating EC2 Launch Template ===" -ForegroundColor Cyan
 $amiId = (aws ssm get-parameter `
     --region $Region `
@@ -232,15 +288,40 @@ if (-not $existingLtId -or $existingLtId -eq "None") {
 Write-Host "Launch Template Ready: $ltName ($ltId, Default Version: $ltVersion)" -ForegroundColor Green
 
 if ($LaunchInstance) {
-    Write-Host "`n=== 7. Launching EC2 Instance from Launch Template $ltName ===" -ForegroundColor Cyan
-    $runResult = aws ec2 run-instances `
+    Write-Host "`n=== 7. Launching / Verifying EC2 Instance from Launch Template $ltName ===" -ForegroundColor Cyan
+    $existingInstance = (aws ec2 describe-instances `
         --region $Region `
-        --launch-template "LaunchTemplateName=$ltName,Version=`$Default" `
-        --min-count 1 --max-count 1 `
-        --output json | ConvertFrom-Json
-    $instanceId = $runResult.Instances[0].InstanceId
-    Write-Host "Launched EC2 Instance: $instanceId. Waiting for running state..." -ForegroundColor Yellow
-    aws ec2 wait instance-running --region $Region --instance-ids $instanceId
+        --filters "Name=tag:Project,Values=DrinksEcommerce" "Name=instance-state-name,Values=pending,running" `
+        --query "Reservations[0].Instances[0].InstanceId" --output text 2>$null)
+
+    if ($existingInstance -and $existingInstance -ne "None") {
+        $instanceId = $existingInstance.Trim()
+        Write-Host "Existing running DrinksEcommerce EC2 instance found: $instanceId" -ForegroundColor Green
+    } else {
+        $runResult = aws ec2 run-instances `
+            --region $Region `
+            --launch-template "LaunchTemplateName=$ltName,Version=`$Default" `
+            --min-count 1 --max-count 1 `
+            --output json | ConvertFrom-Json
+        $instanceId = $runResult.Instances[0].InstanceId
+        Write-Host "Launched EC2 Instance: $instanceId. Waiting for running state..." -ForegroundColor Yellow
+        aws ec2 wait instance-running --region $Region --instance-ids $instanceId
+    }
+
     $publicIp = (aws ec2 describe-instances --region $Region --instance-ids $instanceId --query "Reservations[0].Instances[0].PublicIpAddress" --output text).Trim()
     Write-Host "EC2 Instance Running! InstanceId=$instanceId | PublicIP=$publicIp" -ForegroundColor Green
+
+    aws cloudwatch put-metric-alarm `
+        --region $Region `
+        --alarm-name "drinks-ecommerce-status-check-$instanceId" `
+        --alarm-description "Alert when DrinksEcommerce EC2 instance fails system or instance status check" `
+        --namespace "AWS/EC2" `
+        --metric-name "StatusCheckFailed" `
+        --dimensions "Name=InstanceId,Value=$instanceId" `
+        --statistic Maximum `
+        --period 60 `
+        --evaluation-periods 2 `
+        --threshold 1 `
+        --comparison-operator GreaterThanOrEqualToThreshold | Out-Null
+    Write-Host "CloudWatch Alarm configured: drinks-ecommerce-status-check-$instanceId" -ForegroundColor Green
 }

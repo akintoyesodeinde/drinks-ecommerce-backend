@@ -8,7 +8,7 @@
         "ssm:SendCommand"
       ],
       "Resource": [
-        "arn:aws:ec2:us-east-1:402535053369:instance/*"
+        "arn:aws:ec2:us-east-1:415805875879:instance/*"
       ],
       "Condition": {
         "StringEquals": {

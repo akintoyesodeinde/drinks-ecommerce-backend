@@ -5,7 +5,7 @@
       "Sid": "GitHubActionsOIDCTrustForDrinksEcommerce",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::402535053369:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::415805875879:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
