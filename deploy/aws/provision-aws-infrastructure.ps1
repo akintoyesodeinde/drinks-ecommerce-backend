@@ -24,10 +24,11 @@ param(
     [switch]$LaunchInstance
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+$env:AWS_PAGER = ""
 
 Write-Host "=== 1. Verifying AWS CLI Identity & Account Boundary ===" -ForegroundColor Cyan
-$identityJson = aws sts get-caller-identity --region $Region --output json
+$identityJson = aws sts get-caller-identity --region $Region --cli-connect-timeout 5 --output json
 if ($LASTEXITCODE -ne 0) {
     throw "AWS CLI is not authenticated. Run 'aws login' or 'aws configure sso' first."
 }
@@ -45,9 +46,8 @@ $UserDataPath = Join-Path $DeployDir "ec2-user-data.sh"
 
 Write-Host "`n=== 2. Configuring GitHub Actions IAM OIDC Provider ===" -ForegroundColor Cyan
 $oidcArn = "arn:aws:iam::${ExpectedAccountId}:oidc-provider/token.actions.githubusercontent.com"
-$prevErr = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 $oidcCreateOut = aws iam create-open-id-connect-provider `
+    --cli-connect-timeout 5 `
     --url "https://token.actions.githubusercontent.com" `
     --client-id-list "sts.amazonaws.com" `
     --thumbprint-list "6938fd4d98bab03faadb97b34396831e3780aea1" `
@@ -60,33 +60,29 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "Note: iam:CreateOpenIDConnectProvider is restricted by AWS Ready Set Build Free Plan SCP (p-4xilptm8); continuing with OIDC role configuration." -ForegroundColor Yellow
 }
 
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
 Write-Host "`n=== 3. Configuring Least-Privilege GitHub Actions Deploy Role ===" -ForegroundColor Cyan
 $ghRoleName = "DrinksEcommerce-GitHubActions-Deploy"
 $ghTrustFile = Join-Path $ScriptDir "iam-github-oidc-trust-policy.json"
 $ghPermFile  = Join-Path $ScriptDir "iam-github-deploy-permissions.json"
 
-aws iam get-role --role-name $ghRoleName >$null 2>&1
-if ($LASTEXITCODE -ne 0) {
-    $ErrorActionPreference = "Stop"
+$ghRoleArn = (aws iam get-role --cli-connect-timeout 5 --role-name $ghRoleName --query "Role.Arn" --output text 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $ghRoleArn) {
     aws iam create-role `
+        --cli-connect-timeout 5 `
         --role-name $ghRoleName `
         --assume-role-policy-document "file://$ghTrustFile" `
         --description "Least-privilege OIDC role for DrinksEcommerce GitHub Actions SSM deployment" `
         --tags Key=Project,Value=DrinksEcommerce | Out-Null
-} else {
-    $ErrorActionPreference = "Stop"
-    aws iam update-assume-role-policy `
+    aws iam put-role-policy `
+        --cli-connect-timeout 5 `
         --role-name $ghRoleName `
-        --policy-document "file://$ghTrustFile" | Out-Null
+        --policy-name "DrinksEcommerceSSMDeployPolicy" `
+        --policy-document "file://$ghPermFile" | Out-Null
+    $ghRoleArn = "arn:aws:iam::${ExpectedAccountId}:role/$ghRoleName"
 }
-
-aws iam put-role-policy `
-    --role-name $ghRoleName `
-    --policy-name "DrinksEcommerceSSMDeployPolicy" `
-    --policy-document "file://$ghPermFile" | Out-Null
-
-$ghRoleArn = (aws iam get-role --role-name $ghRoleName --query "Role.Arn" --output text).Trim()
-Write-Host "GitHub Actions OIDC Role Ready: $ghRoleArn" -ForegroundColor Green
+Write-Host "GitHub Actions OIDC Role Ready: $($ghRoleArn.Trim())" -ForegroundColor Green
 
 Write-Host "`n=== 4. Configuring Least-Privilege EC2 Runtime Role & Instance Profile ===" -ForegroundColor Cyan
 $ec2RoleName = "DrinksEcommerce-EC2-Runtime"
@@ -106,36 +102,32 @@ $ec2TrustJson = @'
 }
 '@
 $tempEc2Trust = Join-Path $env:TEMP "drinks-ec2-trust.json"
-Set-Content -Path $tempEc2Trust -Value $ec2TrustJson -Encoding utf8
+[System.IO.File]::WriteAllText($tempEc2Trust, $ec2TrustJson, $utf8NoBom)
 
-$ErrorActionPreference = "Continue"
-aws iam get-role --role-name $ec2RoleName >$null 2>&1
+aws iam get-instance-profile --cli-connect-timeout 5 --instance-profile-name $ec2ProfileName >$null 2>&1
 if ($LASTEXITCODE -ne 0) {
-    $ErrorActionPreference = "Stop"
-    aws iam create-role `
+    aws iam get-role --cli-connect-timeout 5 --role-name $ec2RoleName >$null 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        aws iam create-role `
+            --cli-connect-timeout 5 `
+            --role-name $ec2RoleName `
+            --assume-role-policy-document "file://$tempEc2Trust" `
+            --description "Least-privilege runtime role for DrinksEcommerce EC2 (SSM, CloudWatch, Prod Secrets)" `
+            --tags Key=Project,Value=DrinksEcommerce | Out-Null
+    }
+
+    aws iam attach-role-policy --cli-connect-timeout 5 --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    aws iam attach-role-policy --cli-connect-timeout 5 --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+    aws iam put-role-policy `
+        --cli-connect-timeout 5 `
         --role-name $ec2RoleName `
-        --assume-role-policy-document "file://$tempEc2Trust" `
-        --description "Least-privilege runtime role for DrinksEcommerce EC2 (SSM, CloudWatch, Prod Secrets)" `
-        --tags Key=Project,Value=DrinksEcommerce | Out-Null
-}
-$ErrorActionPreference = "Stop"
+        --policy-name "DrinksEcommerceSecretsReadPolicy" `
+        --policy-document "file://$ec2SecretsPolicyFile" | Out-Null
 
-aws iam attach-role-policy --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-aws iam attach-role-policy --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-aws iam put-role-policy `
-    --role-name $ec2RoleName `
-    --policy-name "DrinksEcommerceSecretsReadPolicy" `
-    --policy-document "file://$ec2SecretsPolicyFile" | Out-Null
-
-$ErrorActionPreference = "Continue"
-aws iam get-instance-profile --instance-profile-name $ec2ProfileName >$null 2>&1
-if ($LASTEXITCODE -ne 0) {
-    $ErrorActionPreference = "Stop"
-    aws iam create-instance-profile --instance-profile-name $ec2ProfileName | Out-Null
-    aws iam add-role-to-instance-profile --instance-profile-name $ec2ProfileName --role-name $ec2RoleName | Out-Null
+    aws iam create-instance-profile --cli-connect-timeout 5 --instance-profile-name $ec2ProfileName | Out-Null
+    aws iam add-role-to-instance-profile --cli-connect-timeout 5 --instance-profile-name $ec2ProfileName --role-name $ec2RoleName | Out-Null
     Start-Sleep -Seconds 10
 }
-$ErrorActionPreference = "Stop"
 Write-Host "EC2 Instance Profile Ready: $ec2ProfileName" -ForegroundColor Green
 
 Write-Host "`n=== 5. Configuring EC2 Security Group (Ports 80 & 443 Only; 1433 & 8080 Internal Only) ===" -ForegroundColor Cyan
@@ -162,61 +154,69 @@ Write-Host "Security Group Ready: $sgId (VPC: $vpcId)" -ForegroundColor Green
 
 Write-Host "`n=== 5b. Ensuring AWS Secrets Manager Secret (drinks-ecommerce/prod/app-secrets) ===" -ForegroundColor Cyan
 $secretName = "drinks-ecommerce/prod/app-secrets"
-$ErrorActionPreference = "Continue"
 aws secretsmanager describe-secret --region $Region --secret-id $secretName >$null 2>&1
 $secretExists = ($LASTEXITCODE -eq 0)
-$ErrorActionPreference = "Stop"
-if (-not $secretExists) {
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $bytes32 = New-Object byte[] 32
-    $rng.GetBytes($bytes32)
-    $sqlPass = "DrkSql#" + ([Convert]::ToBase64String($bytes32).Substring(0, 18) -replace '[+/=]', '9') + "!aA1"
 
-    $bytes64 = New-Object byte[] 48
-    $rng.GetBytes($bytes64)
-    $jwtKey = [Convert]::ToBase64String($bytes64)
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes32 = New-Object byte[] 32
+$rng.GetBytes($bytes32)
+$sqlPass = "DrkSql#" + ([Convert]::ToBase64String($bytes32).Substring(0, 18) -replace '[+/=]', '9') + "!aA1"
 
-    $bytes24 = New-Object byte[] 24
-    $rng.GetBytes($bytes24)
-    $adminPass = "DrkAdm#" + ([Convert]::ToBase64String($bytes24).Substring(0, 16) -replace '[+/=]', '7') + "!zZ9"
+$bytes64 = New-Object byte[] 48
+$rng.GetBytes($bytes64)
+$jwtKey = [Convert]::ToBase64String($bytes64)
 
-    $secretPayload = @{
-        MSSQL_PID = "Express"
-        MSSQL_SA_PASSWORD = $sqlPass
-        ConnectionStrings__DefaultConnection = "Server=sqlserver,1433;Database=DrinksEcommerceDb;User Id=sa;Password=$sqlPass;TrustServerCertificate=True;MultipleActiveResultSets=True;Encrypt=False"
-        ConnectionStrings__Redis = "redis:6379,abortConnect=false"
-        Database__SeedCatalog = "true"
-        Database__SeedDemoAccounts = "false"
-        BootstrapAdmin__Email = "hr@pinnaclesoftwareservices.store"
-        BootstrapAdmin__Password = $adminPass
-        BootstrapAdmin__FirstName = "Akintoye"
-        BootstrapAdmin__LastName = "Sodeinde"
-        BootstrapAdmin__Phone = "+2348030000000"
-        Jwt__Issuer = "DrinksEcommerce.API"
-        Jwt__Audience = "DrinksEcommerce.Clients"
-        Jwt__SigningKey = $jwtKey
-        Payments__Provider = "Simulated"
-        Payments__BaseUrl = "https://api.paystack.co/"
-        Payments__PublicKey = "pk_test_replace_in_secrets_manager"
-        Payments__SecretKey = "sk_test_replace_in_secrets_manager"
-        Store__AlcoholSalesEnabled = "false"
-    } | ConvertTo-Json -Compress
+$bytes24 = New-Object byte[] 24
+$rng.GetBytes($bytes24)
+$adminPass = "DrkAdm#" + ([Convert]::ToBase64String($bytes24).Substring(0, 16) -replace '[+/=]', '7') + "!zZ9"
 
-    $tempSecretFile = Join-Path $env:TEMP ("drinks-secret-" + [Guid]::NewGuid().ToString("N") + ".json")
-    try {
-        Set-Content -Path $tempSecretFile -Value $secretPayload -NoNewline -Encoding utf8
+$secretPayload = @{
+    MSSQL_PID = "Express"
+    MSSQL_SA_PASSWORD = $sqlPass
+    ConnectionStrings__DefaultConnection = "Server=sqlserver,1433;Database=DrinksEcommerceDb;User Id=sa;Password=$sqlPass;TrustServerCertificate=True;MultipleActiveResultSets=True;Encrypt=False"
+    ConnectionStrings__Redis = "redis:6379,abortConnect=false"
+    Database__SeedCatalog = "true"
+    Database__SeedDemoAccounts = "false"
+    BootstrapAdmin__Email = "hr@pinnaclesoftwareservices.store"
+    BootstrapAdmin__Password = $adminPass
+    BootstrapAdmin__FirstName = "Akintoye"
+    BootstrapAdmin__LastName = "Sodeinde"
+    BootstrapAdmin__Phone = "+2348030000000"
+    Jwt__Issuer = "DrinksEcommerce.API"
+    Jwt__Audience = "DrinksEcommerce.Clients"
+    Jwt__SigningKey = $jwtKey
+    Payments__Provider = "Simulated"
+    Payments__BaseUrl = "https://api.paystack.co/"
+    Payments__PublicKey = "pk_test_replace_in_secrets_manager"
+    Payments__SecretKey = "sk_test_replace_in_secrets_manager"
+    Store__AlcoholSalesEnabled = "false"
+} | ConvertTo-Json -Compress
+
+$tempSecretFile = Join-Path $env:TEMP ("drinks-secret-" + [Guid]::NewGuid().ToString("N") + ".json")
+try {
+    [System.IO.File]::WriteAllText($tempSecretFile, $secretPayload, $utf8NoBom)
+    if (-not $secretExists) {
         aws secretsmanager create-secret `
             --region $Region `
             --name $secretName `
             --description "DrinksEcommerce Production Runtime Configuration & Secrets" `
             --secret-string "file://$tempSecretFile" `
             --tags Key=Project,Value=DrinksEcommerce | Out-Null
-        Write-Host "Created Secrets Manager secret: $secretName (strong random credentials generated in memory; never printed)" -ForegroundColor Green
-    } finally {
-        if (Test-Path $tempSecretFile) { Remove-Item -Force $tempSecretFile }
+        Write-Host "Created Secrets Manager secret: $secretName (UTF-8 no BOM)" -ForegroundColor Green
+    } else {
+        $existingSecretStr = (aws secretsmanager get-secret-value --region $Region --secret-id $secretName --query "SecretString" --output text)
+        if ($existingSecretStr -and $existingSecretStr[0] -eq [char]0xFEFF) {
+            aws secretsmanager put-secret-value `
+                --region $Region `
+                --secret-id $secretName `
+                --secret-string "file://$tempSecretFile" | Out-Null
+            Write-Host "Replaced BOM-prefixed Secrets Manager secret with clean UTF-8 (no BOM): $secretName" -ForegroundColor Green
+        } else {
+            Write-Host "Secrets Manager secret already exists (clean UTF-8): $secretName" -ForegroundColor Green
+        }
     }
-} else {
-    Write-Host "Secrets Manager secret already exists: $secretName" -ForegroundColor Green
+} finally {
+    if (Test-Path $tempSecretFile) { Remove-Item -Force $tempSecretFile }
 }
 
 Write-Host "`n=== 6. Resolving Latest Amazon Linux 2023 x86_64 AMI & Creating EC2 Launch Template ===" -ForegroundColor Cyan
@@ -273,7 +273,7 @@ $ltDataObj = @{
 }
 
 $tempLtFile = Join-Path $env:TEMP "drinks-lt-data.json"
-$ltDataObj | ConvertTo-Json -Depth 10 | Set-Content -Path $tempLtFile -Encoding utf8
+[System.IO.File]::WriteAllText($tempLtFile, ($ltDataObj | ConvertTo-Json -Depth 10), $utf8NoBom)
 
 $existingLtId = (aws ec2 describe-launch-templates --region $Region --filters "Name=launch-template-name,Values=$ltName" --query "LaunchTemplates[0].LaunchTemplateId" --output text 2>$null)
 if (-not $existingLtId -or $existingLtId -eq "None") {
@@ -312,8 +312,8 @@ if ($LaunchInstance) {
     } else {
         $runResult = aws ec2 run-instances `
             --region $Region `
-            --launch-template "LaunchTemplateName=$ltName,Version=`$Default" `
-            --min-count 1 --max-count 1 `
+            --launch-template "LaunchTemplateId=$ltId,Version=$ltVersion" `
+            --count 1 `
             --output json | ConvertFrom-Json
         $instanceId = $runResult.Instances[0].InstanceId
         Write-Host "Launched EC2 Instance: $instanceId. Waiting for running state..." -ForegroundColor Yellow

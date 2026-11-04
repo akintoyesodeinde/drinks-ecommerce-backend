@@ -22,8 +22,11 @@ FRONTEND_IMAGE="${FRONTEND_IMAGE:-akintoyesodeinde/drinks-ecommerce-frontend:lat
 # 2. Refresh secrets from AWS Secrets Manager
 "${APP_DIR}/scripts/sync-secrets.sh"
 
-# 3. Verify and pull the immutable backend image tag from Docker Hub
-docker pull "${NEW_IMAGE}"
+# 3. Verify and pull the immutable backend image tag from Docker Hub (or use pre-built local image if already present)
+if ! docker pull "${NEW_IMAGE}"; then
+  echo "Notice: docker pull ${NEW_IMAGE} did not succeed from remote registry; checking local Docker daemon..."
+  docker image inspect "${NEW_IMAGE}" >/dev/null 2>&1 || { echo "ERROR: Image ${NEW_IMAGE} not found locally or on Docker Hub."; exit 1; }
+fi
 
 # 4. Ensure sqlserver and redis are running and healthy without touching existing volumes
 docker compose --env-file "${APP_DIR}/.env" up -d sqlserver redis

@@ -18,8 +18,11 @@ if [ -f "${APP_DIR}/images.env" ]; then
 fi
 BACKEND_IMAGE="${BACKEND_IMAGE:-akintoyesodeinde/drinks-ecommerce-backend:latest}"
 
-# 1. Pull the immutable frontend image tag from Docker Hub
-docker pull "${NEW_IMAGE}"
+# 1. Pull the immutable frontend image tag from Docker Hub (or use pre-built local image if already present)
+if ! docker pull "${NEW_IMAGE}"; then
+  echo "Notice: docker pull ${NEW_IMAGE} did not succeed from remote registry; checking local Docker daemon..."
+  docker image inspect "${NEW_IMAGE}" >/dev/null 2>&1 || { echo "ERROR: Image ${NEW_IMAGE} not found locally or on Docker Hub."; exit 1; }
+fi
 
 # 2. Update image state and re-sync .env (never touches database or backend state)
 cat > "${APP_DIR}/images.env" <<EOF
