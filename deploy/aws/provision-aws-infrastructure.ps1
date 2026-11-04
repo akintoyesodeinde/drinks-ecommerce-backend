@@ -19,8 +19,8 @@
 [CmdletBinding()]
 param(
     [string]$ExpectedAccountId = "415805875879",
-    [string]$Region = "us-east-1",
-    [string]$InstanceType = "t3.medium",
+    [string]$Region = "eu-north-1",
+    [string]$InstanceType = "c7i-flex.large",
     [switch]$LaunchInstance
 )
 
@@ -45,18 +45,19 @@ $UserDataPath = Join-Path $DeployDir "ec2-user-data.sh"
 
 Write-Host "`n=== 2. Configuring GitHub Actions IAM OIDC Provider ===" -ForegroundColor Cyan
 $oidcArn = "arn:aws:iam::${ExpectedAccountId}:oidc-provider/token.actions.githubusercontent.com"
-$existingProviders = aws iam list-open-id-connect-providers --output json | ConvertFrom-Json
-$hasGithubOidc = $existingProviders.OpenIDConnectProviderList | Where-Object { $_.Arn -eq $oidcArn }
-
-if (-not $hasGithubOidc) {
-    aws iam create-open-id-connect-provider `
-        --url "https://token.actions.githubusercontent.com" `
-        --client-id-list "sts.amazonaws.com" `
-        --thumbprint-list "6938fd4d98bab03faadb97b34396831e3780aea1" `
-        --tags Key=Project,Value=DrinksEcommerce | Out-Null
+$prevErr = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$oidcCreateOut = aws iam create-open-id-connect-provider `
+    --url "https://token.actions.githubusercontent.com" `
+    --client-id-list "sts.amazonaws.com" `
+    --thumbprint-list "6938fd4d98bab03faadb97b34396831e3780aea1" `
+    --tags Key=Project,Value=DrinksEcommerce 2>&1
+if ($LASTEXITCODE -eq 0) {
     Write-Host "Created GitHub OIDC Provider: $oidcArn" -ForegroundColor Green
-} else {
+} elseif ("$oidcCreateOut" -match "EntityAlreadyExists") {
     Write-Host "GitHub OIDC Provider already exists: $oidcArn" -ForegroundColor Green
+} else {
+    Write-Host "Note: iam:CreateOpenIDConnectProvider is restricted by AWS Ready Set Build Free Plan SCP (p-4xilptm8); continuing with OIDC role configuration." -ForegroundColor Yellow
 }
 
 Write-Host "`n=== 3. Configuring Least-Privilege GitHub Actions Deploy Role ===" -ForegroundColor Cyan
@@ -64,14 +65,16 @@ $ghRoleName = "DrinksEcommerce-GitHubActions-Deploy"
 $ghTrustFile = Join-Path $ScriptDir "iam-github-oidc-trust-policy.json"
 $ghPermFile  = Join-Path $ScriptDir "iam-github-deploy-permissions.json"
 
-aws iam get-role --role-name $ghRoleName 2>$null | Out-Null
+aws iam get-role --role-name $ghRoleName >$null 2>&1
 if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = "Stop"
     aws iam create-role `
         --role-name $ghRoleName `
         --assume-role-policy-document "file://$ghTrustFile" `
         --description "Least-privilege OIDC role for DrinksEcommerce GitHub Actions SSM deployment" `
         --tags Key=Project,Value=DrinksEcommerce | Out-Null
 } else {
+    $ErrorActionPreference = "Stop"
     aws iam update-assume-role-policy `
         --role-name $ghRoleName `
         --policy-document "file://$ghTrustFile" | Out-Null
@@ -105,14 +108,17 @@ $ec2TrustJson = @'
 $tempEc2Trust = Join-Path $env:TEMP "drinks-ec2-trust.json"
 Set-Content -Path $tempEc2Trust -Value $ec2TrustJson -Encoding utf8
 
-aws iam get-role --role-name $ec2RoleName 2>$null | Out-Null
+$ErrorActionPreference = "Continue"
+aws iam get-role --role-name $ec2RoleName >$null 2>&1
 if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = "Stop"
     aws iam create-role `
         --role-name $ec2RoleName `
         --assume-role-policy-document "file://$tempEc2Trust" `
         --description "Least-privilege runtime role for DrinksEcommerce EC2 (SSM, CloudWatch, Prod Secrets)" `
         --tags Key=Project,Value=DrinksEcommerce | Out-Null
 }
+$ErrorActionPreference = "Stop"
 
 aws iam attach-role-policy --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 aws iam attach-role-policy --role-name $ec2RoleName --policy-arn "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
@@ -121,12 +127,15 @@ aws iam put-role-policy `
     --policy-name "DrinksEcommerceSecretsReadPolicy" `
     --policy-document "file://$ec2SecretsPolicyFile" | Out-Null
 
-aws iam get-instance-profile --instance-profile-name $ec2ProfileName 2>$null | Out-Null
+$ErrorActionPreference = "Continue"
+aws iam get-instance-profile --instance-profile-name $ec2ProfileName >$null 2>&1
 if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = "Stop"
     aws iam create-instance-profile --instance-profile-name $ec2ProfileName | Out-Null
     aws iam add-role-to-instance-profile --instance-profile-name $ec2ProfileName --role-name $ec2RoleName | Out-Null
     Start-Sleep -Seconds 10
 }
+$ErrorActionPreference = "Stop"
 Write-Host "EC2 Instance Profile Ready: $ec2ProfileName" -ForegroundColor Green
 
 Write-Host "`n=== 5. Configuring EC2 Security Group (Ports 80 & 443 Only; 1433 & 8080 Internal Only) ===" -ForegroundColor Cyan
@@ -153,8 +162,11 @@ Write-Host "Security Group Ready: $sgId (VPC: $vpcId)" -ForegroundColor Green
 
 Write-Host "`n=== 5b. Ensuring AWS Secrets Manager Secret (drinks-ecommerce/prod/app-secrets) ===" -ForegroundColor Cyan
 $secretName = "drinks-ecommerce/prod/app-secrets"
-aws secretsmanager describe-secret --region $Region --secret-id $secretName 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) {
+$ErrorActionPreference = "Continue"
+aws secretsmanager describe-secret --region $Region --secret-id $secretName >$null 2>&1
+$secretExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = "Stop"
+if (-not $secretExists) {
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $bytes32 = New-Object byte[] 32
     $rng.GetBytes($bytes32)
