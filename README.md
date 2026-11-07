@@ -4,7 +4,6 @@ Production-oriented **ASP.NET Core 10 LTS (`net10.0`) / C# 14** modular monolith
 
 - **Backend Repository**: `https://github.com/akintoyesodeinde/drinks-ecommerce-backend`
 - **Frontend Repository**: `https://github.com/akintoyesodeinde/drinks-ecommerce-frontend`
-- **Docker Hub Image**: `akintoyesodeinde/drinks-ecommerce-backend:<commit-sha>`
 
 ---
 
@@ -59,9 +58,9 @@ dotnet run --project src/DrinksEcommerce.API -- --migrate
 Defined in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml):
 1. Restores, builds, and executes all unit (`23`), Clean Architecture (`3`), and SQL Server end-to-end integration tests (`15-step purchase-to-refund lifecycle`).
 2. Builds and pushes `akintoyesodeinde/drinks-ecommerce-backend:<commit-sha>` and `:latest` to Docker Hub using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
-3. Authenticates to AWS Account `402535053369` (`us-east-1`) via **GitHub OIDC** (`aws-actions/configure-aws-credentials@v4` with `id-token: write` — **zero static AWS keys in GitHub**).
+3. Authenticates to an AWS Account
 4. Dispatches an AWS Systems Manager (`SSM SendCommand`) execution of `deploy/scripts/deploy-backend.sh` on the `Project=DrinksEcommerce` EC2 instance:
-   - Synchronizes runtime secrets from AWS Secrets Manager (`drinks-ecommerce/prod/app-secrets`).
+   - Synchronizes runtime secrets from AWS Secrets Manager.
    - Takes a pre-migration SQL Server backup.
    - Runs `docker compose run --rm api --migrate`.
    - Performs a rolling update of `drinks-api` to `:<commit-sha>`.
