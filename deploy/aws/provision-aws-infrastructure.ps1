@@ -176,7 +176,7 @@ $secretPayload = @{
     ConnectionStrings__DefaultConnection = "Server=sqlserver,1433;Database=DrinksEcommerceDb;User Id=sa;Password=$sqlPass;TrustServerCertificate=True;MultipleActiveResultSets=True;Encrypt=False"
     ConnectionStrings__Redis = "redis:6379,abortConnect=false"
     Database__SeedCatalog = "true"
-    Database__SeedDemoAccounts = "false"
+    Database__SeedDemoAccounts = "true"
     BootstrapAdmin__Email = "hr@pinnaclesoftwareservices.store"
     BootstrapAdmin__Password = $adminPass
     BootstrapAdmin__FirstName = "Akintoye"

@@ -62,9 +62,32 @@ public static class DatabaseSeeder
             logger.LogInformation("Verified bootstrap administrator account {Email}.", bootstrapAdminEmail.Trim());
         }
 
-        var seedDemoAccounts = isDevelopment && !string.Equals(config?["Database:SeedDemoAccounts"], "false", StringComparison.OrdinalIgnoreCase);
+        var seedDemoAccounts = isDevelopment || !string.Equals(config?["Database:SeedDemoAccounts"], "false", StringComparison.OrdinalIgnoreCase);
         if (seedDemoAccounts)
         {
+            // CTO Sandbox & Presentation Demo Accounts (.ng)
+            await EnsureSeedUserAsync(userManager, "admin@drinksecommerce.ng", "Admin@12345!", "Adaeze", "Okafor (SuperAdmin)", "+2348031000001", Roles.Administrator);
+            await EnsureSeedUserAsync(userManager, "warehouse@drinksecommerce.ng", "Staff@12345!", "Tunde", "Bamidele (Warehouse)", "+2348031000002", Roles.WarehouseStaff);
+            await EnsureSeedUserAsync(userManager, "rider@drinksecommerce.ng", "Rider@12345!", "Musa", "Ibrahim (Rider)", "+2348031000003", Roles.DeliveryStaff);
+            var ngCustomer = await EnsureSeedUserAsync(userManager, "customer@drinksecommerce.ng", "Customer@12345!", "Chinedu", "Eze (Customer)", "+2348031000004", Roles.Customer);
+
+            if (!await db.CustomerAddresses.AnyAsync(a => a.UserId == ngCustomer.Id, ct))
+            {
+                db.CustomerAddresses.Add(new CustomerAddress(
+                    ngCustomer.Id,
+                    "Home - Lekki Phase 1",
+                    "Chinedu Eze",
+                    "+2348031000004",
+                    "Lagos",
+                    "Lekki",
+                    "14 Admiralty Way, Lekki Phase 1",
+                    "Opposite Mega Plaza Gate",
+                    "105102",
+                    "Call on arrival at the estate gate.",
+                    true));
+            }
+
+            // Local Integration Test Accounts (.local)
             await EnsureSeedUserAsync(userManager, "admin@drinksecommerce.local", "Admin#12345", "Adaeze", "Okafor", "+2348031000001", Roles.Administrator);
             await EnsureSeedUserAsync(userManager, "warehouse@drinksecommerce.local", "Warehouse#12345", "Tunde", "Bamidele", "+2348031000002", Roles.WarehouseStaff);
             await EnsureSeedUserAsync(userManager, "rider@drinksecommerce.local", "Rider#12345", "Musa", "Ibrahim", "+2348031000003", Roles.DeliveryStaff);
@@ -291,19 +314,35 @@ public static class DatabaseSeeder
                     "+2348031000011"));
         }
 
+        if (!await db.Categories.AnyAsync(a => a.Name == "Mixers & Syrups", ct) && await db.Categories.AnyAsync(ct))
+        {
+            db.Categories.Add(new Category("Mixers & Syrups", "Premium tonic water, ginger beer, bitters, and cocktail syrups.", "/images/products/fayrouz-can.svg", 6));
+        }
+
+        if (!await db.PickupLocations.AnyAsync(p => p.Name.Contains("Victoria Island"), ct))
+        {
+            db.PickupLocations.Add(new PickupLocation(
+                "Victoria Island Pickup Hub",
+                "Plot 14B Adeola Odeku Street, Victoria Island, Lagos",
+                "Lagos",
+                "Victoria Island",
+                "Mon–Sat 8:00 AM – 7:00 PM (WAT)",
+                "+2348031000012"));
+        }
+
         if (!await db.Coupons.AnyAsync(ct))
         {
             db.Coupons.Add(new Coupon(
                 "WELCOME10",
-                "10% welcome discount on orders from ₦5,000 (up to ₦2,000 off).",
+                "10% welcome discount on orders from ₦5,000 (capped at ₦3,000).",
                 DiscountType.Percentage,
                 10m,
                 5000m,
-                2000m,
+                3000m,
                 DateTimeOffset.UtcNow.AddDays(-7),
                 DateTimeOffset.UtcNow.AddYears(1),
                 1000,
-                3,
+                10,
                 true));
         }
 
@@ -342,6 +381,29 @@ public static class DatabaseSeeder
         var existing = await userManager.FindByEmailAsync(email);
         if (existing is not null)
         {
+            var needsUpdate = false;
+            if (!existing.EmailConfirmed)
+            {
+                existing.EmailConfirmed = true;
+                needsUpdate = true;
+            }
+            if (existing.LockoutEnd is not null || existing.AccessFailedCount > 0)
+            {
+                existing.LockoutEnd = null;
+                existing.AccessFailedCount = 0;
+                needsUpdate = true;
+            }
+            if (needsUpdate)
+            {
+                await userManager.UpdateAsync(existing);
+            }
+
+            if (!await userManager.CheckPasswordAsync(existing, password))
+            {
+                var resetToken = await userManager.GeneratePasswordResetTokenAsync(existing);
+                await userManager.ResetPasswordAsync(existing, resetToken, password);
+            }
+
             if (!await userManager.IsInRoleAsync(existing, role))
             {
                 await userManager.AddToRoleAsync(existing, role);
